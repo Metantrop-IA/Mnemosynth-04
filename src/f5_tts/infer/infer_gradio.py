@@ -404,12 +404,12 @@ The Memory Synthesizer {read_personality_file()}
 
 with gr.Blocks() as app_credits:
     gr.Markdown("""
-# Créditos
-* [ΜΕΤΑΝΘΡΩΠΙΑ](https://github.com/METANTROP-IA) por el [demo de Mnemosynth.](https://github.com/Metantrop-IA/Mnemosynth-00)
-* [OpenAI](https://huggingface.co/openai) por Whisper.
-* [Alibaba](https://huggingface.co/Qwen) por Qwen.                     
-* [Yushen Chen](https://huggingface.co/SWivid) por el [paper original de F5-TTS.](https://arxiv.org/abs/2410.06885)
-* [jpgallegoar](https://github.com/jpgallegoar) por el fine-tuning del modelo F5-TTS al español.
+# Credits
+* [ΜΕΤΑΝΘΡΩΠΙΑ](https://github.com/METANTROP-IA) by the [Mnemosynth demo].(https://github.com/Metantrop-IA/Mnemosynth-01)
+* [OpenAI](https://huggingface.co/openai) by Whisper.
+* [Alibaba](https://huggingface.co/Qwen) by Qwen.                     
+* [Yushen Chen](https://huggingface.co/SWivid) by the original F5-TTS paper].(https://arxiv.org/abs/2410.06885)
+* [jpgallegoar](https://github.com/jpgallegoar) by the Spanish fine-tuning of F5-TTS model.
                 
 """)
 
@@ -417,7 +417,7 @@ with gr.Blocks() as app:
 
     gr.TabbedInterface(
         [app_chat, app_credits],
-        ["Mnemosynth", "Créditos"],
+        ["Mnemosynth", "Credits"],
     )
 
 @click.command()
