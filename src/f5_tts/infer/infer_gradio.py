@@ -406,7 +406,7 @@ with gr.Blocks() as app_chat:
 with gr.Blocks() as app_credits:
     gr.Markdown("""
 # Créditos
-* [ΜΕΤΑΝΘΡΩΠΙΑ](https://github.com/METANTROP-IA) por el [demo de Mnemosynth.](https://github.com/Metantrop-IA/Mnemosynth)
+* [ΜΕΤΑΝΘΡΩΠΙΑ](https://github.com/METANTROP-IA) por el [demo de Mnemosynth.](https://github.com/Metantrop-IA/Mnemosynth-00)
 * [OpenAI](https://huggingface.co/openai) por Whisper.
 * [Alibaba](https://huggingface.co/Qwen) por Qwen.                     
 * [Yushen Chen](https://huggingface.co/SWivid) por el [paper original de F5-TTS.](https://arxiv.org/abs/2410.06885)
