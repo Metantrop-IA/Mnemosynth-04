@@ -175,9 +175,8 @@ def parse_speechtypes_text(gen_text):
 with gr.Blocks() as app_chat:
     gr.Markdown(
         f"""
-# Mnemosynth: The Memory Synthesizer
-
-{read_personality_file()}
+# Mnemosynth
+The Memory Synthesizer of {read_personality_file()}
 """
     )
 
