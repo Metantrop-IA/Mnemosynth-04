@@ -60,7 +60,7 @@ eval = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Metantrop-IA/Mnemosynth"
+Homepage = "https://github.com/Metantrop-IA/Mnemosynth-00"
 
 [project.scripts]
 "f5-tts_infer-cli" = "f5_tts.infer.infer_cli:main"
