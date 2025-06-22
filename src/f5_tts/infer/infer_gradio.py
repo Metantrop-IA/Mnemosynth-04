@@ -176,7 +176,7 @@ with gr.Blocks() as app_chat:
     gr.Markdown(
         f"""
 # Mnemosynth
-The Memory Synthesizer {read_personality_file()}
+The Memory Synthesizer of {read_personality_file()}
 """
     )
 
