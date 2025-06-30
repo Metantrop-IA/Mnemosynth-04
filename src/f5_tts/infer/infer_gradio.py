@@ -258,7 +258,7 @@ The Memory Synthesizer of {read_personality_file()}
         audio_output_chat = gr.Audio(autoplay=True, label="Answer")
     
     with gr.Row():
-        text_input_chat = gr.Textbox(label="Write your Message",lines=1)
+        text_input_chat = gr.Textbox(label="Write your message",lines=1)
     with gr.Row():        
         send_btn_chat = gr.Button("Send")
     with gr.Row():
