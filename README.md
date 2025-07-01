@@ -12,7 +12,7 @@ The Memory Synthesizer - An AI-powered voice & text conversational system that c
 
 ### Docker Deployment
 
-**Using Docker directly:**
+**Using Docker:**
 ```bash
 PENDING
 ```
