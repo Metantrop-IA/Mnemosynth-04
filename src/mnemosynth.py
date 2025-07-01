@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Mnemosynth: The Memory Synthesizer
-A unified script combining TTS inference utilities and Gradio interface
 """
 
 # ============================================================================
