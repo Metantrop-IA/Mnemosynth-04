@@ -30,26 +30,6 @@ import torchaudio
 import soundfile as sf
 import tqdm
 from cached_path import cached_path
-from vocos import Vocos
-from pydub import AudioSegment, silence
-from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
-from num2words import num2words
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-import pdfplumber
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pylab as plt
-import gradio as gr
-
-# Local imports
-from F5_TTS_Files import CFM, DiT, UNetT
-from F5_TTS_Files.utils import (
-    get_tokenizer,
-    convert_char_to_pinyin,
-)
 
 # Add current directory and parent directories to Python path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -76,22 +56,6 @@ def gpu_decorator(func):
     else:
         return func
 
-# Global constants and configuration
-target_sample_rate = 24000
-n_mel_channels = 100
-hop_length = 256
-win_length = 1024
-n_fft = 1024
-mel_spec_type = "vocos"
-target_rms = 0.1
-cross_fade_duration = 0.15
-ode_method = "euler"
-nfe_step = 32
-cfg_strength = 2.0
-sway_sampling_coef = -1.0
-speed = 1.0
-fix_duration = None
-
 # Device configuration
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -99,13 +63,17 @@ device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is
 _ref_audio_cache = {}
 chat_model_state = None
 chat_tokenizer_state = None
-asr_pipe = None
-vocoder = None
-F5TTS_ema_model = None
 
 ################################################################################
 #                          2. VOICE-TO-TEXT (WHISPER)                         #
 ################################################################################
+
+# Whisper and audio processing imports
+from transformers import pipeline
+from pydub import AudioSegment, silence
+
+# Global ASR pipeline state
+asr_pipe = None
 
 def init_asr_pipeline():
     """Initialize Whisper ASR pipeline"""
@@ -220,6 +188,10 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_in
 #                                3. LLM (QWEN)                                #
 ################################################################################
 
+# LLM and NLP imports
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from num2words import num2words
+
 def init_chat_model():
     """Initialize Qwen chat model"""
     global chat_model_state, chat_tokenizer_state
@@ -268,6 +240,13 @@ def traducir_numero_a_texto(texto):
 #                               4. RAG SYSTEM                                 #
 ################################################################################
 
+# RAG system imports
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+import pdfplumber
+
 def setup_rag_system():
     """Setup RAG system with PDF documents"""
     PDF_RAG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "Assets", "RAG"))
@@ -307,6 +286,37 @@ def setup_rag_system():
 ################################################################################
 #                          5. TEXT-TO-SPEECH (F5-TTS)                         #
 ################################################################################
+
+# TTS models and audio processing imports
+from vocos import Vocos
+from F5_TTS_Files import CFM, DiT, UNetT
+from F5_TTS_Files.utils import (
+    get_tokenizer,
+    convert_char_to_pinyin,
+)
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pylab as plt
+
+# Global TTS constants and configuration
+target_sample_rate = 24000
+n_mel_channels = 100
+hop_length = 256
+win_length = 1024
+n_fft = 1024
+mel_spec_type = "vocos"
+target_rms = 0.1
+cross_fade_duration = 0.15
+ode_method = "euler"
+nfe_step = 32
+cfg_strength = 2.0
+sway_sampling_coef = -1.0
+speed = 1.0
+fix_duration = None
+
+# Global TTS models state
+vocoder = None
+F5TTS_ema_model = None
 
 def chunk_text(text, max_chars=135):
     """
@@ -654,6 +664,9 @@ def parse_speechtypes_text(gen_text):
 ################################################################################
 #                                6. GRADIO                                    #
 ################################################################################
+
+# Gradio interface imports
+import gradio as gr
 
 def read_personality_file():
     """Read the content of the Personality.txt file"""
