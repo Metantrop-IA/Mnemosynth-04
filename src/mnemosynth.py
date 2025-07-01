@@ -1,19 +1,55 @@
 #!/usr/bin/env python3
 """
 Mnemosynth: The Memory Synthesizer
+
+Este archivo está organizado en 6 secciones principales:
+1. Dependencias comunes
+2. Voice-To-Text (Whisper)
+3. LLM (Qwen)
+4. RAG System
+5. Text-To-Speech (F5-TTS)
+6. GRADIO
 """
 
-# ============================================================================
-# IMPORTS AND INITIAL SETUP
-# ============================================================================
+################################################################################
+#                            1. DEPENDENCIAS COMUNES                          #
+################################################################################
 
+# Standard library imports
 import os
 import sys
 import re
 import tempfile
 import hashlib
 import click
-# from importlib.resources import files  # No longer needed
+
+# Third-party imports
+import numpy as np
+import torch
+import torchaudio
+import soundfile as sf
+import tqdm
+from cached_path import cached_path
+from vocos import Vocos
+from pydub import AudioSegment, silence
+from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
+from num2words import num2words
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+import pdfplumber
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pylab as plt
+import gradio as gr
+
+# Local imports
+from F5_TTS_Files import CFM, DiT, UNetT
+from F5_TTS_Files.utils import (
+    get_tokenizer,
+    convert_char_to_pinyin,
+)
 
 # Add current directory and parent directories to Python path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -26,43 +62,6 @@ bigvgan_path = os.path.join(project_root, "third_party", "BigVGAN")
 if os.path.exists(bigvgan_path) and bigvgan_path not in sys.path:
     sys.path.append(bigvgan_path)
 
-# Core libraries
-import numpy as np
-import torch
-import torchaudio
-import soundfile as sf
-import tqdm
-from cached_path import cached_path
-
-# Audio processing
-from pydub import AudioSegment, silence
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pylab as plt
-
-# Transformers and NLP
-from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
-from num2words import num2words
-from sentence_transformers import SentenceTransformer
-
-# RAG system
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-import pdfplumber
-
-# TTS models
-from vocos import Vocos
-from F5_TTS_Files import CFM, DiT, UNetT
-from F5_TTS_Files.utils import (
-    get_tokenizer,
-    convert_char_to_pinyin,
-)
-
-# Gradio interface
-import gradio as gr
-
 # Spaces GPU decorator (if available)
 try:
     import spaces
@@ -71,16 +70,13 @@ except ImportError:
     USING_SPACES = False
 
 def gpu_decorator(func):
+    """Decorator for GPU processing in Spaces environment"""
     if USING_SPACES:
         return spaces.GPU(func)
     else:
         return func
 
-# ============================================================================
-# GLOBAL CONSTANTS AND CONFIGURATION
-# ============================================================================
-
-# Audio processing constants
+# Global constants and configuration
 target_sample_rate = 24000
 n_mel_channels = 100
 hop_length = 256
@@ -90,7 +86,7 @@ mel_spec_type = "vocos"
 target_rms = 0.1
 cross_fade_duration = 0.15
 ode_method = "euler"
-nfe_step = 32  # 16, 32
+nfe_step = 32
 cfg_strength = 2.0
 sway_sampling_coef = -1.0
 speed = 1.0
@@ -103,148 +99,26 @@ device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is
 _ref_audio_cache = {}
 chat_model_state = None
 chat_tokenizer_state = None
+asr_pipe = None
+vocoder = None
+F5TTS_ema_model = None
 
-# ============================================================================
-# UTILITY FUNCTIONS FROM utils_infer.py
-# ============================================================================
+################################################################################
+#                          2. VOICE-TO-TEXT (WHISPER)                         #
+################################################################################
 
-def chunk_text(text, max_chars=135):
-    """
-    Splits the input text into chunks, each with a maximum number of characters.
-
-    Args:
-        text (str): The text to be split.
-        max_chars (int): The maximum number of characters per chunk.
-
-    Returns:
-        List[str]: A list of text chunks.
-    """
-    chunks = []
-    current_chunk = ""
-    # Split the text into sentences based on punctuation followed by whitespace
-    sentences = re.split(r"(?<=[;:,.!?])\s+|(?<=[；：，。！？])", text)
-
-    for sentence in sentences:
-        if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
-            current_chunk += sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
-        else:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
-
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-
-    return chunks
-
-
-def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device=device):
-    """Load vocoder model"""
-    if vocoder_name == "vocos":
-        if is_local:
-            print(f"Load vocos from local path {local_path}")
-            vocoder = Vocos.from_hparams(f"{local_path}/config.yaml")
-            state_dict = torch.load(f"{local_path}/pytorch_model.bin", map_location="cpu")
-            vocoder.load_state_dict(state_dict)
-            vocoder = vocoder.eval().to(device)
-        else:
-            print("Download Vocos from huggingface charactr/vocos-mel-24khz")
-            vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz").to(device)
-    elif vocoder_name == "bigvgan":
-        try:
-            from third_party.BigVGAN import bigvgan
-        except ImportError:
-            print("You need to follow the README to init submodule and change the BigVGAN source code.")
-        if is_local:
-            """download from https://huggingface.co/nvidia/bigvgan_v2_24khz_100band_256x/tree/main"""
-            vocoder = bigvgan.BigVGAN.from_pretrained(local_path, use_cuda_kernel=False)
-        else:
-            vocoder = bigvgan.BigVGAN.from_pretrained("nvidia/bigvgan_v2_24khz_100band_256x", use_cuda_kernel=False)
-
-        vocoder.remove_weight_norm()
-        vocoder = vocoder.eval().to(device)
-    return vocoder
-
-
-def load_checkpoint(model, ckpt_path, device, dtype=None, use_ema=True):
-    """Load model checkpoint"""
-    if dtype is None:
-        dtype = (
-            torch.float16 if device == "cuda" and torch.cuda.get_device_properties(device).major >= 6 else torch.float32
-        )
-    model = model.to(dtype)
-
-    ckpt_type = ckpt_path.split(".")[-1]
-    if ckpt_type == "safetensors":
-        from safetensors.torch import load_file
-        checkpoint = load_file(ckpt_path)
-    else:
-        checkpoint = torch.load(ckpt_path, weights_only=True)
-
-    if use_ema:
-        if ckpt_type == "safetensors":
-            checkpoint = {"ema_model_state_dict": checkpoint}
-        checkpoint["model_state_dict"] = {
-            k.replace("ema_model.", ""): v
-            for k, v in checkpoint["ema_model_state_dict"].items()
-            if k not in ["initted", "step"]
-        }
-
-        # patch for backward compatibility, 305e3ea
-        for key in ["mel_spec.mel_stft.mel_scale.fb", "mel_spec.mel_stft.spectrogram.window"]:
-            if key in checkpoint["model_state_dict"]:
-                del checkpoint["model_state_dict"][key]
-
-        model.load_state_dict(checkpoint["model_state_dict"])
-    else:
-        if ckpt_type == "safetensors":
-            checkpoint = {"model_state_dict": checkpoint}
-        model.load_state_dict(checkpoint["model_state_dict"])
-
-    return model.to(device)
-
-
-def load_model(
-    model_cls,
-    model_cfg,
-    ckpt_path,
-    mel_spec_type=mel_spec_type,
-    vocab_file="",
-    ode_method=ode_method,
-    use_ema=True,
-    device=device,
-):
-    """Load F5-TTS model"""
-    if vocab_file == "":
-        vocab_file = os.path.join(os.path.dirname(__file__), "F5_TTS_Files", "vocab.txt")
-    tokenizer = "custom"
-
-    print("\nvocab : ", vocab_file)
-    print("tokenizer : ", tokenizer)
-    print("model : ", ckpt_path, "\n")
-
-    vocab_char_map, vocab_size = get_tokenizer(vocab_file, tokenizer)
-    model = CFM(
-        transformer=model_cls(**model_cfg, text_num_embeds=vocab_size, mel_dim=n_mel_channels),
-        mel_spec_kwargs=dict(
-            n_fft=n_fft,
-            hop_length=hop_length,
-            win_length=win_length,
-            n_mel_channels=n_mel_channels,
-            target_sample_rate=target_sample_rate,
-            mel_spec_type=mel_spec_type,
-        ),
-        odeint_kwargs=dict(
-            method=ode_method,
-        ),
-        vocab_char_map=vocab_char_map,
-    ).to(device)
-
-    dtype = torch.float32 if mel_spec_type == "bigvgan" else None
-    model = load_checkpoint(model, ckpt_path, device, dtype=dtype, use_ema=use_ema)
-
-    return model
-
+def init_asr_pipeline():
+    """Initialize Whisper ASR pipeline"""
+    global asr_pipe
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    asr_pipe = pipeline(
+        "automatic-speech-recognition",
+        model="openai/whisper-large-v3-turbo",
+        torch_dtype=dtype,
+        device=device,
+        generate_kwargs={"task": "transcribe", "language": "es", "forced_decoder_ids": None}
+    )
+    return asr_pipe
 
 def remove_silence_edges(audio, silence_threshold=-42):
     """Remove silence from audio edges"""
@@ -262,9 +136,8 @@ def remove_silence_edges(audio, silence_threshold=-42):
 
     return trimmed_audio
 
-
 def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_info=print, device=device):
-    """Preprocess reference audio and text"""
+    """Preprocess reference audio and text with Whisper transcription"""
     show_info("Converting audio...")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
         aseg = AudioSegment.from_file(ref_audio_orig)
@@ -319,14 +192,7 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_in
             global asr_pipe
             if asr_pipe is None:
                 # Initialize ASR pipeline if not already done
-                dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-                asr_pipe = pipeline(
-                    "automatic-speech-recognition",
-                    model="openai/whisper-large-v3-turbo",
-                    torch_dtype=dtype,
-                    device=device,
-                    generate_kwargs={"task": "transcribe", "language": "es", "forced_decoder_ids": None}
-                )
+                init_asr_pipeline()
             show_info("No reference text provided, transcribing reference audio...")
             ref_text = asr_pipe(
                 ref_audio,
@@ -350,6 +216,231 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_in
 
     return ref_audio, ref_text
 
+################################################################################
+#                                3. LLM (QWEN)                                #
+################################################################################
+
+def init_chat_model():
+    """Initialize Qwen chat model"""
+    global chat_model_state, chat_tokenizer_state
+    if chat_model_state is None:
+        model_name = "Qwen/Qwen2.5-3B-Instruct"
+        chat_model_state = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="auto", device_map="auto")
+        chat_tokenizer_state = AutoTokenizer.from_pretrained(model_name)
+    return chat_model_state, chat_tokenizer_state
+
+@gpu_decorator
+def generate_response(messages, model, tokenizer):
+    """Generate response using Qwen"""
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
+    generated_ids = model.generate(
+        **model_inputs,
+        max_new_tokens=512,
+        temperature=0.7,
+        top_p=0.95,
+    )
+
+    generated_ids = [
+        output_ids[len(input_ids) :] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+    ]
+    return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+def traducir_numero_a_texto(texto):
+    """Convert numbers to text in Spanish"""
+    texto_separado = re.sub(r'([A-Za-z])(\d)', r'\1 \2', texto)
+    texto_separado = re.sub(r'(\d)([A-Za-z])', r'\1 \2', texto_separado)
+    
+    def reemplazar_numero(match):
+        numero = match.group()
+        return num2words(int(numero), lang='es')
+
+    texto_traducido = re.sub(r'\b\d+\b', reemplazar_numero, texto_separado)
+
+    return texto_traducido
+
+################################################################################
+#                               4. RAG SYSTEM                                 #
+################################################################################
+
+def setup_rag_system():
+    """Setup RAG system with PDF documents"""
+    PDF_RAG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "Assets", "RAG"))
+    if os.path.isdir(PDF_RAG_DIR):
+        pdf_files = [os.path.join(PDF_RAG_DIR, f) for f in os.listdir(PDF_RAG_DIR) if f.lower().endswith('.pdf')]
+    else:
+        print(f"ADVERTENCIA: Carpeta de PDFs para RAG no encontrada: {PDF_RAG_DIR}")
+        pdf_files = []
+
+    rag_documents = []
+    if pdf_files:
+        for pdf_file in pdf_files:
+            try:
+                loader = PyPDFLoader(pdf_file)
+                rag_documents.extend(loader.load())
+            except Exception as e:
+                print(f"Error loading PDF {pdf_file}: {e}")
+    else:
+        print("No PDF files found for RAG context retrieval.")
+
+    if not rag_documents:
+        print("ADVERTENCIA: No se encontraron PDFs en Assets/RAG. La recuperación de contexto estará deshabilitada.")
+        chroma_db = None
+        def retrieve_context(query, top_k=3):
+            return []
+    else:
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        rag_chunks = splitter.split_documents(rag_documents)
+        embedding = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        chroma_db = Chroma.from_documents(rag_chunks, embedding, persist_directory=os.path.join(PDF_RAG_DIR, "chroma_db"))
+        def retrieve_context(query, top_k=3):
+            results = chroma_db.similarity_search(query, k=top_k)
+            return [doc.page_content for doc in results]
+    
+    return retrieve_context
+
+################################################################################
+#                          5. TEXT-TO-SPEECH (F5-TTS)                         #
+################################################################################
+
+def chunk_text(text, max_chars=135):
+    """
+    Splits the input text into chunks, each with a maximum number of characters.
+
+    Args:
+        text (str): The text to be split.
+        max_chars (int): The maximum number of characters per chunk.
+
+    Returns:
+        List[str]: A list of text chunks.
+    """
+    chunks = []
+    current_chunk = ""
+    # Split the text into sentences based on punctuation followed by whitespace
+    sentences = re.split(r"(?<=[;:,.!?])\s+|(?<=[；：，。！？])", text)
+
+    for sentence in sentences:
+        if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
+            current_chunk += sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
+        else:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
+
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
+    return chunks
+
+def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device=device):
+    """Load vocoder model"""
+    if vocoder_name == "vocos":
+        if is_local:
+            print(f"Load vocos from local path {local_path}")
+            vocoder = Vocos.from_hparams(f"{local_path}/config.yaml")
+            state_dict = torch.load(f"{local_path}/pytorch_model.bin", map_location="cpu")
+            vocoder.load_state_dict(state_dict)
+            vocoder = vocoder.eval().to(device)
+        else:
+            print("Download Vocos from huggingface charactr/vocos-mel-24khz")
+            vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz").to(device)
+    elif vocoder_name == "bigvgan":
+        try:
+            from third_party.BigVGAN import bigvgan
+        except ImportError:
+            print("You need to follow the README to init submodule and change the BigVGAN source code.")
+        if is_local:
+            """download from https://huggingface.co/nvidia/bigvgan_v2_24khz_100band_256x/tree/main"""
+            vocoder = bigvgan.BigVGAN.from_pretrained(local_path, use_cuda_kernel=False)
+        else:
+            vocoder = bigvgan.BigVGAN.from_pretrained("nvidia/bigvgan_v2_24khz_100band_256x", use_cuda_kernel=False)
+
+        vocoder.remove_weight_norm()
+        vocoder = vocoder.eval().to(device)
+    return vocoder
+
+def load_checkpoint(model, ckpt_path, device, dtype=None, use_ema=True):
+    """Load model checkpoint"""
+    if dtype is None:
+        dtype = (
+            torch.float16 if device == "cuda" and torch.cuda.get_device_properties(device).major >= 6 else torch.float32
+        )
+    model = model.to(dtype)
+
+    ckpt_type = ckpt_path.split(".")[-1]
+    if ckpt_type == "safetensors":
+        from safetensors.torch import load_file
+        checkpoint = load_file(ckpt_path)
+    else:
+        checkpoint = torch.load(ckpt_path, weights_only=True)
+
+    if use_ema:
+        if ckpt_type == "safetensors":
+            checkpoint = {"ema_model_state_dict": checkpoint}
+        checkpoint["model_state_dict"] = {
+            k.replace("ema_model.", ""): v
+            for k, v in checkpoint["ema_model_state_dict"].items()
+            if k not in ["initted", "step"]
+        }
+
+        # patch for backward compatibility, 305e3ea
+        for key in ["mel_spec.mel_stft.mel_scale.fb", "mel_spec.mel_stft.spectrogram.window"]:
+            if key in checkpoint["model_state_dict"]:
+                del checkpoint["model_state_dict"][key]
+
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        if ckpt_type == "safetensors":
+            checkpoint = {"model_state_dict": checkpoint}
+        model.load_state_dict(checkpoint["model_state_dict"])
+
+    return model.to(device)
+
+def load_model(
+    model_cls,
+    model_cfg,
+    ckpt_path,
+    mel_spec_type=mel_spec_type,
+    vocab_file="",
+    ode_method=ode_method,
+    use_ema=True,
+    device=device,
+):
+    """Load F5-TTS model"""
+    if vocab_file == "":
+        vocab_file = os.path.join(os.path.dirname(__file__), "F5_TTS_Files", "vocab.txt")
+    tokenizer = "custom"
+
+    print("\nvocab : ", vocab_file)
+    print("tokenizer : ", tokenizer)
+    print("model : ", ckpt_path, "\n")
+
+    vocab_char_map, vocab_size = get_tokenizer(vocab_file, tokenizer)
+    model = CFM(
+        transformer=model_cls(**model_cfg, text_num_embeds=vocab_size, mel_dim=n_mel_channels),
+        mel_spec_kwargs=dict(
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            n_mel_channels=n_mel_channels,
+            target_sample_rate=target_sample_rate,
+            mel_spec_type=mel_spec_type,
+        ),
+        odeint_kwargs=dict(
+            method=ode_method,
+        ),
+        vocab_char_map=vocab_char_map,
+    ).to(device)
+
+    dtype = torch.float32 if mel_spec_type == "bigvgan" else None
+    model = load_checkpoint(model, ckpt_path, device, dtype=dtype, use_ema=use_ema)
+
+    return model
 
 def infer_process(
     ref_audio,
@@ -515,7 +606,6 @@ def infer_batch_process(
 
     return final_wave, target_sample_rate, combined_spectrogram
 
-
 def remove_silence_for_generated_wav(filename):
     """Remove silence from generated wav file"""
     aseg = AudioSegment.from_file(filename)
@@ -528,7 +618,6 @@ def remove_silence_for_generated_wav(filename):
     aseg = non_silent_wave
     aseg.export(filename, format="wav")
 
-
 def save_spectrogram(spectrogram, path):
     """Save spectrogram plot"""
     plt.figure(figsize=(12, 4))
@@ -537,9 +626,34 @@ def save_spectrogram(spectrogram, path):
     plt.savefig(path)
     plt.close()
 
-# ============================================================================
-# GRADIO INTERFACE FUNCTIONS
-# ============================================================================
+def parse_speechtypes_text(gen_text):
+    """Parse speech types from text"""
+    # Pattern to find {speechtype}
+    pattern = r"\{(.*?)\}"
+
+    # Split the text by the pattern
+    tokens = re.split(pattern, gen_text)
+
+    segments = []
+
+    current_style = "Regular"
+
+    for i in range(len(tokens)):
+        if i % 2 == 0:
+            # This is text
+            text = tokens[i].strip()
+            if text:
+                segments.append({"style": current_style, "text": text})
+        else:
+            # This is style
+            style = tokens[i].strip()
+            current_style = style
+
+    return segments
+
+################################################################################
+#                                6. GRADIO                                    #
+################################################################################
 
 def read_personality_file():
     """Read the content of the Personality.txt file"""
@@ -554,44 +668,6 @@ def read_personality_file():
         error_msg = "Error: No se pudo encontrar el archivo Personality.txt"
         print(error_msg)
         return error_msg
-
-
-@gpu_decorator
-def generate_response(messages, model, tokenizer):
-    """Generate response using Qwen"""
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-
-    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-    generated_ids = model.generate(
-        **model_inputs,
-        max_new_tokens=512,
-        temperature=0.7,
-        top_p=0.95,
-    )
-
-    generated_ids = [
-        output_ids[len(input_ids) :] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-    ]
-    return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
-
-def traducir_numero_a_texto(texto):
-    """Convert numbers to text in Spanish"""
-    texto_separado = re.sub(r'([A-Za-z])(\d)', r'\1 \2', texto)
-    texto_separado = re.sub(r'(\d)([A-Za-z])', r'\1 \2', texto_separado)
-    
-    def reemplazar_numero(match):
-        numero = match.group()
-        return num2words(int(numero), lang='es')
-
-    texto_traducido = re.sub(r'\b\d+\b', reemplazar_numero, texto_separado)
-
-    return texto_traducido
-
 
 @gpu_decorator
 def infer(
@@ -637,69 +713,38 @@ def infer(
 
     return (final_sample_rate, final_wave), spectrogram_path
 
-
-def parse_speechtypes_text(gen_text):
-    """Parse speech types from text"""
-    # Pattern to find {speechtype}
-    pattern = r"\{(.*?)\}"
-
-    # Split the text by the pattern
-    tokens = re.split(pattern, gen_text)
-
-    segments = []
-
-    current_style = "Regular"
-
-    for i in range(len(tokens)):
-        if i % 2 == 0:
-            # This is text
-            text = tokens[i].strip()
-            if text:
-                segments.append({"style": current_style, "text": text})
-        else:
-            # This is style
-            style = tokens[i].strip()
-            current_style = style
-
-    return segments
-
-# ============================================================================
-# MODEL INITIALIZATION
-# ============================================================================
-
-# Initialize ASR pipeline
-dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-asr_pipe = pipeline(
-    "automatic-speech-recognition",
-    model="openai/whisper-large-v3-turbo",
-    torch_dtype=dtype,
-    device=device,
-    generate_kwargs={"task": "transcribe", "language": "es", "forced_decoder_ids": None}
-)
-
-# Load vocoder
-vocoder = load_vocoder()
-
-# Load F5-TTS model
-F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
-F5TTS_ema_model = load_model(
-    DiT, F5TTS_model_cfg, str(cached_path("hf://jpgallegoar/F5-Spanish/model_1200000.safetensors"))
-)
-
-# ============================================================================
-# GRADIO INTERFACE SETUP
-# ============================================================================
-
-def create_chat_interface():
-    """Create the main chat interface"""
+def init_models():
+    """Initialize all models and global state"""
+    global asr_pipe, vocoder, F5TTS_ema_model, chat_model_state, chat_tokenizer_state
     
+    # Initialize ASR pipeline
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    asr_pipe = pipeline(
+        "automatic-speech-recognition",
+        model="openai/whisper-large-v3-turbo",
+        torch_dtype=dtype,
+        device=device,
+        generate_kwargs={"task": "transcribe", "language": "es", "forced_decoder_ids": None}
+    )
+
+    # Load vocoder
+    vocoder = load_vocoder()
+
+    # Load F5-TTS model
+    F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
+    F5TTS_ema_model = load_model(
+        DiT, F5TTS_model_cfg, str(cached_path("hf://jpgallegoar/F5-Spanish/model_1200000.safetensors"))
+    )
+
     # Initialize chat model
-    global chat_model_state, chat_tokenizer_state
     if chat_model_state is None:
         model_name = "Qwen/Qwen2.5-3B-Instruct"
         chat_model_state = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="auto", device_map="auto")
         chat_tokenizer_state = AutoTokenizer.from_pretrained(model_name)
 
+def create_chat_interface():
+    """Create the main chat interface"""
+    
     # Setup asset paths
     ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "Assets"))
     initial_prompt_path = os.path.join(ASSETS_DIR, "Initial_Prompt.txt")
@@ -723,38 +768,8 @@ def create_chat_interface():
         print(f"Error leyendo archivo Voice_Ref_Trans.txt en {voice_ref_trans_path}: {e}")
         voice_ref_trans = ""
 
-    # RAG System Setup
-    PDF_RAG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "Assets", "RAG"))
-    if os.path.isdir(PDF_RAG_DIR):
-        pdf_files = [os.path.join(PDF_RAG_DIR, f) for f in os.listdir(PDF_RAG_DIR) if f.lower().endswith('.pdf')]
-    else:
-        print(f"ADVERTENCIA: Carpeta de PDFs para RAG no encontrada: {PDF_RAG_DIR}")
-        pdf_files = []
-
-    rag_documents = []
-    if pdf_files:
-        for pdf_file in pdf_files:
-            try:
-                loader = PyPDFLoader(pdf_file)
-                rag_documents.extend(loader.load())
-            except Exception as e:
-                print(f"Error loading PDF {pdf_file}: {e}")
-    else:
-        print("No PDF files found for RAG context retrieval.")
-
-    if not rag_documents:
-        print("ADVERTENCIA: No se encontraron PDFs en Assets/RAG. La recuperación de contexto estará deshabilitada.")
-        chroma_db = None
-        def retrieve_context(query, top_k=3):
-            return []
-    else:
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        rag_chunks = splitter.split_documents(rag_documents)
-        embedding = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        chroma_db = Chroma.from_documents(rag_chunks, embedding, persist_directory=os.path.join(PDF_RAG_DIR, "chroma_db"))
-        def retrieve_context(query, top_k=3):
-            results = chroma_db.similarity_search(query, k=top_k)
-            return [doc.page_content for doc in results]
+    # Setup RAG system
+    retrieve_context = setup_rag_system()
 
     # Create Gradio interface
     with gr.Blocks() as app_chat:
@@ -923,7 +938,6 @@ def create_chat_interface():
 
     return app_chat
 
-
 def create_credits_interface():
     """Create the credits interface"""
     with gr.Blocks() as app_credits:
@@ -938,9 +952,11 @@ def create_credits_interface():
     """)
     return app_credits
 
-
 def create_main_app():
     """Create the main tabbed application"""
+    # Initialize all models before creating the interface
+    init_models()
+    
     app_chat = create_chat_interface()
     app_credits = create_credits_interface()
     
@@ -952,9 +968,9 @@ def create_main_app():
     
     return app
 
-# ============================================================================
-# MAIN ENTRY POINT
-# ============================================================================
+################################################################################
+#                            MAIN ENTRY POINT                                 #
+################################################################################
 
 @click.command()
 @click.option("--port", "-p", default=None, type=int, help="Puerto para ejecutar la aplicación")
@@ -977,7 +993,6 @@ def main(port, host, share, api):
         share=share, 
         show_api=api
     )
-
 
 if __name__ == "__main__":
     if not USING_SPACES:
