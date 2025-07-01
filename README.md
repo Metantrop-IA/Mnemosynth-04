@@ -14,8 +14,7 @@ The Memory Synthesizer - An AI-powered voice & text conversational system that c
 
 **Using Docker directly:**
 ```bash
-docker build -t mnemosynth .
-docker run -p 7860:7860 mnemosynth
+PENDING
 ```
 
 ### Assets Directory
@@ -36,8 +35,6 @@ For best results with voice cloning:
 - Single speaker
 - Minimal background noise
 
-## Technical Details
-
 ### Models Used
 
 - **TTS**: F5-TTS Spanish fine-tuned model by jpgallegoar
@@ -50,15 +47,6 @@ For best results with voice cloning:
 - **GPU**: CUDA-compatible GPU recommended (fallback to CPU/MPS)
 - **RAM**: 8GB minimum, 16GB+ recommended
 - **Storage**: 5GB+ for models and dependencies
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Import Errors**: Ensure all dependencies are installed via `pip install -r requirements.txt`
-2. **CUDA Issues**: Install PyTorch with CUDA support if using GPU
-3. **Audio Issues**: Check microphone permissions and audio device settings
-4. **Memory Issues**: Reduce batch size or use CPU inference
 
 ### Performance Tips
 

@@ -14,7 +14,7 @@ import re
 import tempfile
 import hashlib
 import click
-from importlib.resources import files
+# from importlib.resources import files  # No longer needed
 
 # Add current directory and parent directories to Python path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -55,8 +55,8 @@ import pdfplumber
 
 # TTS models
 from vocos import Vocos
-from f5_tts.model import CFM, DiT, UNetT
-from f5_tts.model.utils import (
+from .F5_TTS_Files import CFM, DiT, UNetT
+from .F5_TTS_Files.utils import (
     get_tokenizer,
     convert_char_to_pinyin,
 )
@@ -217,7 +217,7 @@ def load_model(
 ):
     """Load F5-TTS model"""
     if vocab_file == "":
-        vocab_file = str(files("f5_tts").joinpath("infer/examples/vocab.txt"))
+        vocab_file = os.path.join(os.path.dirname(__file__), "F5_TTS_Files", "vocab.txt")
     tokenizer = "custom"
 
     print("\nvocab : ", vocab_file)
