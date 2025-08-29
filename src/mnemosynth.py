@@ -2,17 +2,17 @@
 """
 Mnemosynth: The Memory Synthesizer
 
-Este archivo está organizado en 6 secciones principales:
-1. Dependencias comunes
+This file is organized in 6 main sections:
+1. Common Dependencies
 2. Voice-To-Text (Whisper)
 3. LLM (Qwen)
 4. RAG System
 5. Text-To-Speech (F5-TTS)
-6. GRADIO
+6. Gradio UI
 """
 
 ################################################################################
-#                            1. DEPENDENCIAS COMUNES                          #
+#                            1. COMMON DEPENDENCIES                           #
 ################################################################################
 
 # Standard library imports
@@ -84,7 +84,8 @@ def init_asr_pipeline():
         model="openai/whisper-large-v3-turbo",
         torch_dtype=dtype,
         device=device,
-        generate_kwargs={"task": "transcribe", "language": "es", "forced_decoder_ids": None}
+    # Force English transcription
+    generate_kwargs={"task": "transcribe", "language": "en", "forced_decoder_ids": None}
     )
     return asr_pipe
 
@@ -203,9 +204,35 @@ def init_chat_model():
 
 @gpu_decorator
 def generate_response(messages, model, tokenizer):
-    """Generate response using Qwen"""
+    """Generate response using Qwen with enforced English output."""
+    # Ensure there's a strong English-only system directive
+    english_directive = (
+        "CRITICAL INSTRUCTION: You are an AI assistant that must ALWAYS respond EXCLUSIVELY in English. "
+        "This is non-negotiable. Even if the user writes in Spanish, Portuguese, French, or any other language, "
+        "you must understand their message and respond ONLY in English. "
+        "NEVER use Spanish words, phrases, or sentences in your response unless explicitly quoting the user. "
+        "If you detect any non-English input, internally translate it to English first, then provide your response "
+        "entirely in English. Your entire response must be in natural, fluent English."
+    )
+    
+    # Create a copy of messages to avoid modifying the original
+    messages_copy = messages.copy()
+    
+    # Ensure the English directive is at the beginning
+    if not messages_copy or messages_copy[0].get("role") != "system":
+        messages_copy.insert(0, {"role": "system", "content": english_directive})
+    else:
+        # Prepend the English directive to existing system message
+        original_system_content = messages_copy[0]["content"]
+        messages_copy[0]["content"] = english_directive + "\n\n" + original_system_content
+
+    # Also add English enforcement to the generation prompt
+    if messages_copy and messages_copy[-1].get("role") == "user":
+        user_content = messages_copy[-1]["content"]
+        messages_copy[-1]["content"] = f"{user_content}\n\nRemember: Respond ONLY in English."
+
     text = tokenizer.apply_chat_template(
-        messages,
+        messages_copy,
         tokenize=False,
         add_generation_prompt=True,
     )
@@ -216,25 +243,38 @@ def generate_response(messages, model, tokenizer):
         max_new_tokens=512,
         temperature=0.7,
         top_p=0.95,
+        do_sample=True,
+        pad_token_id=tokenizer.eos_token_id,
     )
 
     generated_ids = [
         output_ids[len(input_ids) :] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
     ]
-    return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
-def traducir_numero_a_texto(texto):
-    """Convert numbers to text in Spanish"""
-    texto_separado = re.sub(r'([A-Za-z])(\d)', r'\1 \2', texto)
-    texto_separado = re.sub(r'(\d)([A-Za-z])', r'\1 \2', texto_separado)
     
-    def reemplazar_numero(match):
-        numero = match.group()
-        return num2words(int(numero), lang='es')
+    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    
+    # Post-processing to ensure clean English output
+    response = response.strip()
+    
+    return response
 
-    texto_traducido = re.sub(r'\b\d+\b', reemplazar_numero, texto_separado)
+def number_to_text(text_str):
+    """Convert digit tokens to their English word form (basic normalization)."""
+    # Insert spaces where a letter immediately touches a digit (or vice‑versa)
+    separated = re.sub(r'([A-Za-z])(\d)', r'\1 \2', text_str)
+    separated = re.sub(r'(\d)([A-Za-z])', r'\1 \2', separated)
 
-    return texto_traducido
+    def replace_number(match):
+        num = match.group()
+        try:
+            return num2words(int(num), lang='en')
+        except Exception:
+            return num  # fallback
+
+    return re.sub(r'\b\d+\b', replace_number, separated)
+
+# Backwards compatibility alias (old Spanish name)
+traducir_numero_a_texto = number_to_text
 
 ################################################################################
 #                               4. RAG SYSTEM                                 #
@@ -253,7 +293,7 @@ def setup_rag_system():
     if os.path.isdir(PDF_RAG_DIR):
         pdf_files = [os.path.join(PDF_RAG_DIR, f) for f in os.listdir(PDF_RAG_DIR) if f.lower().endswith('.pdf')]
     else:
-        print(f"ADVERTENCIA: Carpeta de PDFs para RAG no encontrada: {PDF_RAG_DIR}")
+        print(f"WARNING: PDFs folder for RAG not found: {PDF_RAG_DIR}")
         pdf_files = []
 
     rag_documents = []
@@ -268,16 +308,16 @@ def setup_rag_system():
         print("No PDF files found for RAG context retrieval.")
 
     if not rag_documents:
-        print("ADVERTENCIA: No se encontraron PDFs en Assets/RAG. La recuperación de contexto estará deshabilitada.")
+        print("WARNING: No PDFs found in Assets/RAG. Context retrieval will be disabled.")
         chroma_db = None
-        def retrieve_context(query, top_k=3):
+        def retrieve_context(query, top_k=3):  # noqa: D401
             return []
     else:
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         rag_chunks = splitter.split_documents(rag_documents)
         embedding = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         chroma_db = Chroma.from_documents(rag_chunks, embedding, persist_directory=os.path.join(PDF_RAG_DIR, "chroma_db"))
-        def retrieve_context(query, top_k=3):
+        def retrieve_context(query, top_k=3):  # noqa: D401
             results = chroma_db.similarity_search(query, k=top_k)
             return [doc.page_content for doc in results]
     
@@ -675,10 +715,10 @@ def read_personality_file():
         personality_path = os.path.join(current_dir, "Assets", "Personality.txt")
         with open(personality_path, 'r', encoding='utf-8') as file:
             content = file.read().strip()
-            print(f"Personality.txt cargado exitosamente desde: {personality_path}")
+            print(f"Loaded Personality.txt from: {personality_path}")
             return content
     except FileNotFoundError:
-        error_msg = "Error: No se pudo encontrar el archivo Personality.txt"
+        error_msg = "Error: Personality.txt file not found"
         print(error_msg)
         return error_msg
 
@@ -697,7 +737,7 @@ def infer(
         gen_text += ". "
 
     gen_text = gen_text.lower()
-    gen_text = traducir_numero_a_texto(gen_text)
+    gen_text = number_to_text(gen_text)
 
     final_wave, final_sample_rate, combined_spectrogram = infer_process(
         ref_audio,
@@ -737,17 +777,29 @@ def init_models():
         model="openai/whisper-large-v3-turbo",
         torch_dtype=dtype,
         device=device,
-        generate_kwargs={"task": "transcribe", "language": "es", "forced_decoder_ids": None}
+        generate_kwargs={"task": "transcribe", "language": "en", "forced_decoder_ids": None}
     )
 
     # Load vocoder
     vocoder = load_vocoder()
 
-    # Load F5-TTS model
+    # Load F5-TTS model (English enforced). Env var F5_TTS_MODEL_PATH overrides. Falls back to previous Spanish finetune.
     F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
-    F5TTS_ema_model = load_model(
-        DiT, F5TTS_model_cfg, str(cached_path("hf://jpgallegoar/F5-Spanish/model_1200000.safetensors"))
-    )
+    # Updated to use the correct English F5-TTS model path from HuggingFace
+    primary_tts_model = os.getenv("F5_TTS_MODEL_PATH", "hf://SWivid/F5-TTS/F5TTS_Base/model_1200000.safetensors")
+    fallback_tts_model = "hf://jpgallegoar/F5-Spanish/model_1200000.safetensors"
+    chosen_path = primary_tts_model
+    try:
+        F5TTS_ema_model = load_model(DiT, F5TTS_model_cfg, str(cached_path(chosen_path)))
+        print(f"Loaded English F5-TTS model: {chosen_path}")
+    except Exception as e:
+        print(f"Primary English TTS model failed ({chosen_path}): {e}\nAttempting fallback Spanish model (will still speak English text).")
+        try:
+            F5TTS_ema_model = load_model(DiT, F5TTS_model_cfg, str(cached_path(fallback_tts_model)))
+            print(f"Loaded fallback TTS model: {fallback_tts_model}")
+        except Exception as e2:
+            print(f"Failed to load fallback TTS model: {e2}")
+            F5TTS_ema_model = None
 
     # Initialize chat model
     if chat_model_state is None:
@@ -767,18 +819,29 @@ def create_chat_interface():
     # Load initial prompt and reference files
     try:
         with open(initial_prompt_path, "r", encoding="utf-8") as f:
-            initial_prompt = f.read().strip()
-            print(f"Archivo Initial_Prompt.txt cargado exitosamente en: {initial_prompt_path}")
+            file_prompt = f.read().strip()
+            print(f"Loaded Initial_Prompt.txt from: {initial_prompt_path}")
     except Exception as e:
-        print(f"Error leyendo Initial_Prompt.txt en {initial_prompt_path}: {e}")
-        initial_prompt = "No eres un asistente de IA, eres quien el usuario diga que eres..."
+        print(f"Error reading Initial_Prompt.txt at {initial_prompt_path}: {e}")
+        file_prompt = "(No initial prompt file found.)"
+    
+    # Force English system directive regardless of file content
+    # This ensures the LLM always responds in English while preserving the Initial_Prompt.txt dependency
+    initial_prompt = (
+        "CRITICAL INSTRUCTION: You are an AI assistant that must ALWAYS respond EXCLUSIVELY in English. "
+        "This is non-negotiable. Even if the user writes in Spanish, Portuguese, French, or any other language, "
+        "you must understand their message and respond ONLY in English. "
+        "NEVER use Spanish words, phrases, or sentences in your response unless explicitly quoting the user. "
+        "If you detect any non-English input, internally translate it to English first, then provide your response "
+        "entirely in English. Your entire response must be in natural, fluent English.\n\n" + file_prompt
+    )
 
     try:
         with open(voice_ref_trans_path, "r") as f:
             voice_ref_trans = f.read().strip()
-            print(f"Archivo Voice_Ref_Trans.txt cargado exitosamente en: {voice_ref_trans_path}")
+            print(f"Loaded Voice_Ref_Trans.txt from: {voice_ref_trans_path}")
     except Exception as e:
-        print(f"Error leyendo archivo Voice_Ref_Trans.txt en {voice_ref_trans_path}: {e}")
+        print(f"Error reading Voice_Ref_Trans.txt at {voice_ref_trans_path}: {e}")
         voice_ref_trans = ""
 
     # Setup RAG system
@@ -795,7 +858,7 @@ def create_chat_interface():
 
         # Hidden components for TTS configuration
         ref_audio_chat = gr.Audio(value=voice_ref_wav_path, visible=False, type="filepath")
-        model_choice_chat = gr.Radio(choices=["F5-TTS"], label="Seleccionar Modelo TTS", value="F5-TTS", visible=False)
+        model_choice_chat = gr.Radio(choices=["F5-TTS"], label="Select TTS Model", value="F5-TTS", visible=False)
         remove_silence_chat = gr.Checkbox(value=True, visible=False)
         ref_text_chat = gr.Textbox(value=voice_ref_trans, visible=False)
         system_prompt_chat = gr.Textbox(value=initial_prompt, visible=False)
@@ -805,10 +868,10 @@ def create_chat_interface():
             audio_input_chat = gr.Microphone(label="Record your message", type="filepath")
         with gr.Row():
             audio_output_chat = gr.Audio(autoplay=True, label="Answer")
-        
+
         with gr.Row():
             text_input_chat = gr.Textbox(label="Write your message", lines=1)
-        with gr.Row():        
+        with gr.Row():
             send_btn_chat = gr.Button("Send")
         with gr.Row():
             chatbot_interface = gr.Chatbot(
@@ -841,8 +904,16 @@ def create_chat_interface():
                 return history, conv_state
 
             # RAG: Retrieve relevant context
-            contexto = " ".join(retrieve_context(text, top_k=3))
-            conv_state.append({"role": "system", "content": f"Contexto relevante: {contexto}"})
+            relevant_context = " \n".join(retrieve_context(text, top_k=3))
+            if relevant_context:
+                conv_state.append({
+                    "role": "system",
+                    "content": (
+                        "IMPORTANT: The following background context may be originally in Spanish, but you must "
+                        "ALWAYS respond EXCLUSIVELY in English. Process this information and respond only in English:\n"
+                        f"{relevant_context}"
+                    )
+                })
             conv_state.append({"role": "user", "content": text})
 
             response = generate_response(conv_state, chat_model_state, chat_tokenizer_state)
@@ -861,6 +932,9 @@ def create_chat_interface():
         def generate_audio_response(history, ref_audio, ref_text, model, remove_silence):
             """Generate TTS audio for AI response"""
             if not history or not ref_audio:
+                return None
+            if F5TTS_ema_model is None:
+                print("TTS model unavailable; skipping audio generation.")
                 return None
 
             # Get last assistant message
@@ -956,7 +1030,7 @@ def create_credits_interface():
     with gr.Blocks() as app_credits:
         gr.Markdown("""
     # Credits
-    * [ΜΕΤΑΝΘΡΩΠΙΑ](https://github.com/METANTROP-IA) by this [Mnemosynth demo.](https://github.com/Metantrop-IA/Mnemosynth-02)
+    * [ΜΕΤΑΝΘΡΩΠΙΑ](https://github.com/METANTROP-IA) by this [Mnemosynth demo.](https://github.com/Metantrop-IA/Mnemosynth-03)
     * [OpenAI](https://huggingface.co/openai) by Whisper.
     * [Alibaba](https://huggingface.co/Qwen) by Qwen.                     
     * [Yushen Chen](https://huggingface.co/SWivid) by the original [F5-TTS paper.](https://arxiv.org/abs/2410.06885)
@@ -986,19 +1060,19 @@ def create_main_app():
 ################################################################################
 
 @click.command()
-@click.option("--port", "-p", default=None, type=int, help="Puerto para ejecutar la aplicación")
-@click.option("--host", "-H", default=None, help="Host para ejecutar la aplicación")
+@click.option("--port", "-p", default=None, type=int, help="Port to run the application on")
+@click.option("--host", "-H", default=None, help="Host/IP to bind the server")
 @click.option(
     "--share",
     "-s",
     default=False,
     is_flag=True,
-    help="Compartir la aplicación a través de un enlace compartido de Gradio",
+    help="Create a public Gradio share link",
 )
-@click.option("--api", "-a", default=True, is_flag=True, help="Permitir acceso a la API")
+@click.option("--api", "-a", default=True, is_flag=True, help="Expose the Gradio API schema")
 def main(port, host, share, api):
     """Main function to launch the Mnemosynth application"""
-    print("Iniciando Mnemosynth - The Memory Synthesizer...")
+    print("Starting Mnemosynth - The Memory Synthesizer...")
     app = create_main_app()
     app.queue(api_open=api).launch(
         server_name=host, 

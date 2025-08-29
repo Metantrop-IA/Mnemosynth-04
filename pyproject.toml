@@ -60,7 +60,7 @@ eval = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Metantrop-IA/Mnemosynth-02"
+Homepage = "https://github.com/Metantrop-IA/Mnemosynth-03"
 
 [project.scripts]
 "mnemosynth" = "mnemosynth:main"
