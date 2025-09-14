@@ -1030,7 +1030,7 @@ def create_credits_interface():
     with gr.Blocks() as app_credits:
         gr.Markdown("""
     # Credits
-    * [ΜΕΤΑΝΘΡΩΠΙΑ](https://github.com/METANTROP-IA) by this [Mnemosynth demo.](https://github.com/Metantrop-IA/Mnemosynth-03)
+    * [ΜΕΤΑΝΘΡΩΠΙΑ](https://github.com/METANTROP-IA) by this [Mnemosynth demo.](https://github.com/Metantrop-IA/Mnemosynth-04)
     * [OpenAI](https://huggingface.co/openai) by Whisper.
     * [Alibaba](https://huggingface.co/Qwen) by Qwen.                     
     * [Yushen Chen](https://huggingface.co/SWivid) by the original [F5-TTS paper.](https://arxiv.org/abs/2410.06885)
